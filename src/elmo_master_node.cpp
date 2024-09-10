@@ -1,14 +1,20 @@
 #include "elmo_master/elmo_master_node.hpp"
 
 ElmoMasterNode::ElmoMasterNode()
-    : Node("elmo_master"), current_state_(FSMState::INIT), transition_error_(false)
+    : Node("elmo_master"), current_state_(FSMState::INIT), transition_error_flag_(false)
 {
     // Declare and get the parameters
     init_params();
+    // Log that the node is up and running
+    RCLCPP_INFO(this->get_logger(), "ElmoMasterNode started...");
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] type      : %s", can_interface_.c_str(), type_.c_str());
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] interface : %s", can_interface_.c_str(), can_interface_.c_str());
+    // Initialize the state machine
     current_state_ = FSMState::INIT;
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State : %s", can_interface_.c_str(), state_to_string(current_state_).c_str());
     transit_to_preop();
     // Initialize services
-    estop_service_ = this->create_service<std_srvs::srv::Trigger>(
+    stop_service_ = this->create_service<std_srvs::srv::Trigger>(
         "elmo_estop",
         std::bind(&ElmoMasterNode::handle_stop, this, std::placeholders::_1, std::placeholders::_2));
     reset_service_ = this->create_service<std_srvs::srv::Trigger>(
@@ -22,14 +28,20 @@ ElmoMasterNode::ElmoMasterNode()
     // Initialize subscribers
     target_velocity_sub_ = this->create_subscription<std_msgs::msg::Float32>("target_velocity", 10,
                             std::bind(&ElmoMasterNode::target_velocity_callback, this, std::placeholders::_1));
-    // Log that the node is up and running
-    RCLCPP_INFO(this->get_logger(), "ElmoMasterNode started...");
-    RCLCPP_INFO(this->get_logger(), "[Master] type  : %s", type_.c_str());
-    RCLCPP_INFO(this->get_logger(), "[Master] state : %d", static_cast<int>(current_state_));
+}
+
+ElmoMasterNode::~ElmoMasterNode() {
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] ElmoMasterNode is being destroyed.", can_interface_.c_str());
+}
+
+void ElmoMasterNode::siginit_exit() {
+    RCLCPP_WARN(this->get_logger(), "SIGINT (ctrl+C) received. Shutting down...");
+    transit_to_exit();
 }
 
 std::string ElmoMasterNode::state_to_string(FSMState state) {
-    switch (state) {
+    switch (state) 
+    {
         case FSMState::INIT:
             return "INIT";
         case FSMState::PREOP:
@@ -49,37 +61,44 @@ void ElmoMasterNode::transit_to_preop()
 {
     if (current_state_ != FSMState::INIT)
     {
-        RCLCPP_ERROR(this->get_logger(), "[Master] Cannot transition to PREOP from %s", state_to_string(current_state_).c_str());
-        transition_error_ = true;
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Cannot transition to PREOP from %s", 
+                     can_interface_.c_str(), state_to_string(current_state_).c_str());
+        transition_error_flag_ = true;
         transit_to_exit();
     }
-    RCLCPP_INFO(this->get_logger(), "[Master] Transitioning to PREOP State...");
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to PREOP State...", can_interface_.c_str());
     // [TODO] Implement pre-operational state behavior, read device state, PDO mapping, etc
+    // ...
     current_state_ = FSMState::PREOP;
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+                can_interface_.c_str(), state_to_string(current_state_).c_str());
 }
 
 void ElmoMasterNode::transit_to_op()
 {
     if (current_state_ == FSMState::PREOP)
     {
-        RCLCPP_INFO(this->get_logger(), "[Master] Transitioning to OP State...");
+        RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to OP State...", can_interface_.c_str());
         // [TODO] Implement OP state behavior, such as enabling motor control
+        // ...
         current_state_ = FSMState::OP;
+        RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+                can_interface_.c_str(), state_to_string(current_state_).c_str());
     }
     else if (current_state_ == FSMState::STOP)
     {
-        RCLCPP_INFO(this->get_logger(), "[Master] Transitioning to OP State...");
+        RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to OP State...", can_interface_.c_str());
         // [TODO] Implement OP state behavior, such as recovering motor control
+        // ...
         current_state_ = FSMState::OP;
+        RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+                can_interface_.c_str(), state_to_string(current_state_).c_str());
     }
-    else if (current_state_ == FSMState::INIT)
+    else
     {
-        RCLCPP_ERROR(this->get_logger(), "[Master] Cannot transition to OP from %s", state_to_string(current_state_).c_str());
-        rclcpp::shutdown();
-    } else 
-    {
-        RCLCPP_ERROR(this->get_logger(), "[Master] Cannot transition to OP from %s", state_to_string(current_state_).c_str());
-        transition_error_ = true;
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Cannot transition to OP from %s", 
+                     can_interface_.c_str(), state_to_string(current_state_).c_str());
+        transition_error_flag_ = true;
         transit_to_exit();
     }
 }
@@ -88,57 +107,62 @@ void ElmoMasterNode::transit_to_stop()
 {
     if (current_state_ != FSMState::OP)
     {
-        RCLCPP_ERROR(this->get_logger(), "[Master] Cannot transition to STOP from %s", state_to_string(current_state_).c_str());
-        if (current_state_ == FSMState::INIT)
-        {
-            rclcpp::shutdown();
-        }
-        transition_error_ = true;
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Cannot transition to STOP from %s", 
+                     can_interface_.c_str(), state_to_string(current_state_).c_str());
+        transition_error_flag_ = true;
         transit_to_exit();
     }
-    RCLCPP_INFO(this->get_logger(), "[Master] Transitioning to STOP State...");
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to STOP State...", can_interface_.c_str());
     // [TODO] Implement STOP state behavior, such as quick-stop the device
+    // ...
     current_state_ = FSMState::STOP;
-}
-
-void ElmoMasterNode::transit_to_exit()
-{
-    if (current_state_ != FSMState::OP) 
-    {
-        if (!transition_error_)
-        {
-            RCLCPP_ERROR(this->get_logger(), "[Master] Cannot transition to EXIT from %s", state_to_string(current_state_).c_str());
-        }
-        if (current_state_ == FSMState::INIT)
-        {
-            assert(!transition_error_ && "transition_error_ cannot be true in INIT state. Check the transition logic again");
-            rclcpp::shutdown();
-        }
-    } else 
-    {
-        RCLCPP_INFO(this->get_logger(), "[Master] Transitioning to EXIT State...");
-    }
-    // [TODO] Implement EXIT state behavior, shutdown devices, stop SYNC messages, etc
-    current_state_ = FSMState::EXIT;
-    rclcpp::shutdown();
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+                can_interface_.c_str(), state_to_string(current_state_).c_str());
 }
 
 void ElmoMasterNode::transit_to_init()
 {
     if (current_state_ != FSMState::STOP) 
     {
-        RCLCPP_ERROR(this->get_logger(), "[Master] Cannot transition to INIT from %s", state_to_string(current_state_).c_str());
-        if (current_state_ == FSMState::INIT)
-        {
-            rclcpp::shutdown();
-        }
-        transition_error_ = true;
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Cannot transition to INIT from %s", 
+                     can_interface_.c_str(), state_to_string(current_state_).c_str());
+        transition_error_flag_ = true;
         transit_to_exit();
     }
-    RCLCPP_INFO(this->get_logger(), "[Master] Transitioning to INIT state...");
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to INIT state...", can_interface_.c_str());
     // [TODO] Implement INIT state behavior, Reset devices, parameters, etc., and transition to PREOP
+    // ...
     current_state_ = FSMState::INIT;
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+                can_interface_.c_str(), state_to_string(current_state_).c_str());
     transit_to_preop();
+}
+
+void ElmoMasterNode::transit_to_exit()
+{
+    if (current_state_ != FSMState::OP && !transition_error_flag_) 
+    {
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Cannot transition to EXIT from %s", 
+                     can_interface_.c_str(), state_to_string(current_state_).c_str());
+        transition_error_flag_ = true;
+    }
+    if (current_state_ != FSMState::INIT)
+    {
+        // [TODO] Implement EXIT state behavior, shutdown devices, stop SYNC messages, etc
+        // ...
+    }
+    if (transition_error_flag_)
+    {
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Transition to EXIT state due to transition error...", can_interface_.c_str());
+    }
+    else
+    {
+        RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to EXIT state...", can_interface_.c_str());
+    }
+    current_state_ = FSMState::EXIT;
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+                can_interface_.c_str(), state_to_string(current_state_).c_str());
+    rclcpp::shutdown();
 }
 
 bool ElmoMasterNode::send_can_message(uint32_t can_id, uint8_t can_dlc, const uint8_t data[8])
@@ -147,7 +171,7 @@ bool ElmoMasterNode::send_can_message(uint32_t can_id, uint8_t can_dlc, const ui
     int sock = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (sock < 0)
     {
-        RCLCPP_ERROR(this->get_logger(), "Error while opening CAN socket");
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Error while opening CAN socket", can_interface_.c_str());
         return false;
     }
     // Set up the CAN interface
@@ -155,7 +179,7 @@ bool ElmoMasterNode::send_can_message(uint32_t can_id, uint8_t can_dlc, const ui
     strcpy(ifr.ifr_name, can_interface_.c_str());
     if (ioctl(sock, SIOCGIFINDEX, &ifr) < 0)
     {
-        RCLCPP_ERROR(this->get_logger(), "Error retrieving CAN interface index for %s", can_interface_.c_str());
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Error retrieving CAN interface index", can_interface_.c_str());
         close(sock);
         return false;
     }
@@ -167,7 +191,7 @@ bool ElmoMasterNode::send_can_message(uint32_t can_id, uint8_t can_dlc, const ui
     // Bind the socket to the CAN interface
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
-        RCLCPP_ERROR(this->get_logger(), "Error in CAN socket bind on %s", can_interface_.c_str());
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Error in CAN socket bind", can_interface_.c_str());
         close(sock);
         return false;
     }
@@ -180,7 +204,7 @@ bool ElmoMasterNode::send_can_message(uint32_t can_id, uint8_t can_dlc, const ui
     // Send the CAN frame
     if (write(sock, &frame, sizeof(frame)) != sizeof(frame))
     {
-        RCLCPP_ERROR(this->get_logger(), "Error sending CAN frame on %s", can_interface_.c_str());
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Error sending CAN frame", can_interface_.c_str());
         close(sock);
         return false;
     }
@@ -189,7 +213,7 @@ bool ElmoMasterNode::send_can_message(uint32_t can_id, uint8_t can_dlc, const ui
     snprintf(can_data_str, sizeof(can_data_str), "%02X%02X%02X%02X%02X%02X%02X%02X",
              frame.data[0], frame.data[1], frame.data[2], frame.data[3],
              frame.data[4], frame.data[5], frame.data[6], frame.data[7]);
-    RCLCPP_INFO(this->get_logger(), "[%s] %03X#%s", can_interface_.c_str(), frame.can_id, can_data_str);
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] %03X#%s", can_interface_.c_str(), frame.can_id, can_data_str);
     // Close the socket
     close(sock);
     return true;
@@ -201,26 +225,33 @@ void ElmoMasterNode::init_params()
     this->declare_parameter<std::string>("type", "combined");
     this->declare_parameter<std::string>("can_interface", "can0");
 
-    this->get_parameter("type", type_);
-    if (type_ == "throttle" || type_ == "steering")
+    if (!this->get_parameter("can_interface", can_interface_))
     {
-        RCLCPP_ERROR(this->get_logger(),
-                     "Mode '%s' is not implemented yet. Exiting...", type_.c_str());
+        RCLCPP_ERROR(this->get_logger(), "[-][Master] Failed to retrieve parameter 'can_interface'.");
         rclcpp::shutdown();
     }
-    else if (type_ != "combined")
+    if (can_interface_ != "can0" && can_interface_ != "can1")
     {
-        RCLCPP_WARN(this->get_logger(),
-                    "Invalid type parameter '%s', Defaulting to combined.", type_.c_str());
-        type_ = "combined";
+        RCLCPP_ERROR(this->get_logger(), "[-][Master] CAN interface '%s' is not supported.", can_interface_.c_str());
+        rclcpp::shutdown();
     }
-    this->get_parameter("can_interface", can_interface_);
+    if (!this->get_parameter("type", type_)) 
+    {
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Failed to retrieve parameter 'type'.", can_interface_.c_str());
+        rclcpp::shutdown();
+    }
+    if (type_ != "combined")
+    {
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Mode '%s' is not implemented yet.", 
+                     can_interface_.c_str(), type_.c_str());
+        rclcpp::shutdown();
+    }
 }
 
 void ElmoMasterNode::handle_stop(const std_srvs::srv::Trigger::Request::SharedPtr,
                                   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
-    RCLCPP_WARN(this->get_logger(), "ESTOP Triggerd");
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] ESTOP Triggerd", can_interface_.c_str());
     // [TODO] Handle emergency stop logic
     //
     response->success = false;
@@ -230,9 +261,9 @@ void ElmoMasterNode::handle_stop(const std_srvs::srv::Trigger::Request::SharedPt
 void ElmoMasterNode::handle_reset(const std_srvs::srv::Trigger::Request::SharedPtr,
                                   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
-    RCLCPP_WARN(this->get_logger(), "RESET Triggered");
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] RESET Triggered", can_interface_.c_str());
     // [TODO] Handle reset logic
-    uint8_t data[8] = {0x81, 0x00}; // NMT command: Reset all noes, Node ID 0x00 (all nodes)
+    uint8_t data[8] = {0x81, 0x00}; // NMT command: Reset all nodes, Node ID 0x00 (all nodes)
     // Use the new send_can_message function
     if (send_can_message(0x000, 2, data))
     {
@@ -249,7 +280,7 @@ void ElmoMasterNode::handle_reset(const std_srvs::srv::Trigger::Request::SharedP
 void ElmoMasterNode::handle_start(const std_srvs::srv::Trigger::Request::SharedPtr,
                                   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
-    RCLCPP_WARN(this->get_logger(), "START Triggered");
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] START Triggered", can_interface_.c_str());
     // [TODO] Handle start logic
     //
     response->success = false;
@@ -259,7 +290,7 @@ void ElmoMasterNode::handle_start(const std_srvs::srv::Trigger::Request::SharedP
 void ElmoMasterNode::target_velocity_callback(const std_msgs::msg::Float32::SharedPtr msg)
 {
     target_velocity_ = msg->data;
-    RCLCPP_INFO(this->get_logger(), "Target Velocity Received: %f", target_velocity_);
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Velocity Received: %f", can_interface_.c_str(), target_velocity_);
     // [TODO] Implement velocity control logic
     // For now, just simulate publishing the current velocity
     current_velocity_ = target_velocity_;

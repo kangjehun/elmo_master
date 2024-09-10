@@ -21,17 +21,18 @@ enum class FSMState {
     EXIT
 };
 
-
 class ElmoMasterNode : public rclcpp::Node {
 public:
     ElmoMasterNode();
+    ~ElmoMasterNode();
+    void siginit_exit();
 private:
     // methods
     void init_params();
-    void transit_to_init();
     void transit_to_preop();
     void transit_to_op();
     void transit_to_stop();
+    void transit_to_init();
     void transit_to_exit();
     bool send_can_message(uint32_t can_id, uint8_t can_dlc, const uint8_t data[8]); 
     // utils
@@ -50,7 +51,7 @@ private:
     // subscribers
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr target_velocity_sub_;
     // services
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr estop_service_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_service_;
     // parameters
@@ -58,7 +59,7 @@ private:
     std::string can_interface_;
     // variables
     FSMState current_state_;
-    bool transition_error_;
+    bool transition_error_flag_;
     float current_velocity_ = 0.0;
     float target_velocity_  = 0.0;
 };
