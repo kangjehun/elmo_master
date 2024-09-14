@@ -11,18 +11,24 @@ ElmoMasterNode::ElmoMasterNode()
     RCLCPP_INFO(this->get_logger(), "[%s][Master] interface : %s", can_interface_.c_str(), can_interface_.c_str());
     // Initialize the state machine
     current_state_ = FSMState::INIT;
-    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State : %s", can_interface_.c_str(), state_to_string(current_state_).c_str());
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State : %s", can_interface_.c_str(), state_to_string(current_state_).c_str());
     transit_to_preop();
     // Initialize services
-    stop_service_ = this->create_service<std_srvs::srv::Trigger>(
-        "elmo_estop",
-        std::bind(&ElmoMasterNode::handle_stop, this, std::placeholders::_1, std::placeholders::_2));
-    reset_service_ = this->create_service<std_srvs::srv::Trigger>(
-        "elmo_reset",
-        std::bind(&ElmoMasterNode::handle_reset, this, std::placeholders::_1, std::placeholders::_2));
     start_service_ = this->create_service<std_srvs::srv::Trigger>(
         "elmo_start",
         std::bind(&ElmoMasterNode::handle_start, this, std::placeholders::_1, std::placeholders::_2));
+    exit_service_ = this->create_service<std_srvs::srv::Trigger>(
+        "elmo_exit",
+        std::bind(&ElmoMasterNode::handle_exit, this, std::placeholders::_1, std::placeholders::_2));
+    stop_service_ = this->create_service<std_srvs::srv::Trigger>(
+        "elmo_stop",
+        std::bind(&ElmoMasterNode::handle_stop, this, std::placeholders::_1, std::placeholders::_2));
+    recover_service_ = this->create_service<std_srvs::srv::Trigger>(
+        "elmo_recover",
+        std::bind(&ElmoMasterNode::handle_recover, this, std::placeholders::_1, std::placeholders::_2));
+    reset_service_ = this->create_service<std_srvs::srv::Trigger>(
+        "elmo_reset",
+        std::bind(&ElmoMasterNode::handle_reset, this, std::placeholders::_1, std::placeholders::_2));
     // Initialize publishers
     current_velocity_pub_ = this->create_publisher<std_msgs::msg::Float32>("current_velocity", 10);
     // Initialize subscribers
@@ -70,7 +76,7 @@ void ElmoMasterNode::transit_to_preop()
     // [TODO] Implement pre-operational state behavior, read device state, PDO mapping, etc
     // ...
     current_state_ = FSMState::PREOP;
-    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s", 
                 can_interface_.c_str(), state_to_string(current_state_).c_str());
 }
 
@@ -82,7 +88,7 @@ void ElmoMasterNode::transit_to_op()
         // [TODO] Implement OP state behavior, such as enabling motor control
         // ...
         current_state_ = FSMState::OP;
-        RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+        RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s", 
                 can_interface_.c_str(), state_to_string(current_state_).c_str());
     }
     else if (current_state_ == FSMState::STOP)
@@ -91,7 +97,7 @@ void ElmoMasterNode::transit_to_op()
         // [TODO] Implement OP state behavior, such as recovering motor control
         // ...
         current_state_ = FSMState::OP;
-        RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+        RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s", 
                 can_interface_.c_str(), state_to_string(current_state_).c_str());
     }
     else
@@ -116,7 +122,7 @@ void ElmoMasterNode::transit_to_stop()
     // [TODO] Implement STOP state behavior, such as quick-stop the device
     // ...
     current_state_ = FSMState::STOP;
-    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s", 
                 can_interface_.c_str(), state_to_string(current_state_).c_str());
 }
 
@@ -131,9 +137,12 @@ void ElmoMasterNode::transit_to_init()
     }
     RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to INIT state...", can_interface_.c_str());
     // [TODO] Implement INIT state behavior, Reset devices, parameters, etc., and transition to PREOP
+    // (NMT) Reset all nodes
+    uint8_t data[8] = {0x81, 0x00}; 
+    send_can_message(0x000, 2, data);
     // ...
     current_state_ = FSMState::INIT;
-    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s", 
                 can_interface_.c_str(), state_to_string(current_state_).c_str());
     transit_to_preop();
 }
@@ -160,7 +169,7 @@ void ElmoMasterNode::transit_to_exit()
         RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to EXIT state...", can_interface_.c_str());
     }
     current_state_ = FSMState::EXIT;
-    RCLCPP_INFO(this->get_logger(), "[%s][Master] Current State: %s", 
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s", 
                 can_interface_.c_str(), state_to_string(current_state_).c_str());
     rclcpp::shutdown();
 }
@@ -247,13 +256,32 @@ void ElmoMasterNode::init_params()
         rclcpp::shutdown();
     }
 }
+void ElmoMasterNode::handle_start(const std_srvs::srv::Trigger::Request::SharedPtr,
+                                  std_srvs::srv::Trigger::Response::SharedPtr response)
+{
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] START Triggered", can_interface_.c_str());
+    transit_to_op();
+    // [TODO] success/failure logic
+    response->success = false;
+    response->message = "Start is not Implemented Yet.";
+}
+
+void ElmoMasterNode::handle_exit(const std_srvs::srv::Trigger::Request::SharedPtr,
+                                 std_srvs::srv::Trigger::Response::SharedPtr response)
+{
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] EXIT Triggered", can_interface_.c_str());
+    transit_to_exit();
+    // [TODO] success/failure logic
+    response->success = false;
+    response->message = "Exit is not Implemented Yet.";
+}
 
 void ElmoMasterNode::handle_stop(const std_srvs::srv::Trigger::Request::SharedPtr,
                                   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
     RCLCPP_WARN(this->get_logger(), "[%s][Master] ESTOP Triggerd", can_interface_.c_str());
-    // [TODO] Handle emergency stop logic
-    //
+    transit_to_stop();
+    // [TODO] success/failure logic
     response->success = false;
     response->message = "Emergency Stop is not Implemented Yet.";
 }
@@ -262,29 +290,20 @@ void ElmoMasterNode::handle_reset(const std_srvs::srv::Trigger::Request::SharedP
                                   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
     RCLCPP_WARN(this->get_logger(), "[%s][Master] RESET Triggered", can_interface_.c_str());
-    // [TODO] Handle reset logic
-    uint8_t data[8] = {0x81, 0x00}; // NMT command: Reset all nodes, Node ID 0x00 (all nodes)
-    // Use the new send_can_message function
-    if (send_can_message(0x000, 2, data))
-    {
-        response->success = true;
-        response->message = "Reset all nodes successfully";
-    }
-    else
-    {
-        response->success = false;
-        response->message = "Failed to send CAN message";
-    }
+    transit_to_init();
+    // [TODO] success/failure logic
+    response->success = false;
+    response->message = "Reset is not Implemented Yet.";
 }
 
-void ElmoMasterNode::handle_start(const std_srvs::srv::Trigger::Request::SharedPtr,
-                                  std_srvs::srv::Trigger::Response::SharedPtr response)
+void ElmoMasterNode::handle_recover(const std_srvs::srv::Trigger::Request::SharedPtr,
+                                    std_srvs::srv::Trigger::Response::SharedPtr response)
 {
-    RCLCPP_WARN(this->get_logger(), "[%s][Master] START Triggered", can_interface_.c_str());
-    // [TODO] Handle start logic
-    //
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] RECOVER Triggered", can_interface_.c_str());
+    transit_to_op();
+    // [TODO] success/failure logic
     response->success = false;
-    response->message = "Start is not Implemented Yet.";
+    response->message = "Recover is not Implemented Yet.";
 }
 
 void ElmoMasterNode::target_velocity_callback(const std_msgs::msg::Float32::SharedPtr msg)
