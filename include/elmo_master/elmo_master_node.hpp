@@ -3,6 +3,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
 // FSM States
@@ -35,6 +36,25 @@ enum class COBType
     UNKNOWN
 };
 
+enum class SYNCAction
+{
+    DISABLE_SYNC,
+    RESET_AND_ENABLE_DEVICE,
+    STOP_DEVICE,
+    PDO_CONTROL
+};
+
+enum class DeviceStatus
+{
+    FAULT,
+    NOT_READY_TO_SWITCH_ON,
+    QUICK_STOP_ACTIVE,
+    SWITCH_ON_DISABLED,
+    READY_TO_SWITCH_ON,
+    SWITCHED_ON,
+    OPERATION_ENABLED
+};
+
 // CAN message structure
 struct CANMessage
 {
@@ -51,6 +71,7 @@ struct CANDevice
     int id;
     std::string name;
     std::string type;
+    DeviceStatus status;
 };
 
 class ElmoMasterNode : public rclcpp::Node 
@@ -73,7 +94,7 @@ private:
     void transit_to_exit(bool transition_error = false);
     bool send_and_check_can_message(const CANMessage &message, uint8_t node_id);
     bool send_can_message(const CANMessage &message, uint8_t node_id);
-    void send_sync_message();
+    
     static COBType hex_to_cobtype(uint32_t cob_id);
     static std::string state_to_string(FSMState state);
     static std::string cobtype_to_string(COBType cob_type);
@@ -92,31 +113,43 @@ private:
                       std_srvs::srv::Trigger::Response::SharedPtr response);
     // subscriber callback
     void target_velocity_callback(const std_msgs::msg::Float32::SharedPtr msg);
+    void target_position_callback(const std_msgs::msg::Float32::SharedPtr msg);
     // timer callback
-    rclcpp::TimerBase::SharedPtr sync_timer_;
+    void sync_callback();
     // publishers
-    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr current_velocity_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr actual_velocity_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr actual_position_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr elmo_status_pub_;
     // subscribers
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr target_velocity_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr target_position_sub_;
     // services
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr exit_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recover_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
+    // callback groups
+    rclcpp::CallbackGroup::SharedPtr service_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr sync_cb_group_;
     // parameters
     std::string type_;
     std::string can_interface_;
     std::string can_config_file_;
     // variables
     FSMState current_state_;
+    std::mutex sync_mutex_;
+    std::condition_variable sync_cv_;
     std::vector<CANDevice> can_devices_;
+    rclcpp::TimerBase::SharedPtr sync_timer_;
     rclcpp::Time sync_start_time_;
+    SYNCAction sync_action_;
     int sync_interval_ms_;
     int can_socket_;
-    float current_velocity_ = 0.0;
-    float target_velocity_  = 0.0;
-    bool enable_sync_ = false;
+    float actual_velocity_;
+    float actual_position_;
+    float target_velocity_;
+    float target_position_;
 };
 
 #endif // ELMO_MASTER_NODE_HPP

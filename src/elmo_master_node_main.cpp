@@ -17,6 +17,9 @@ int main(int argc, char **argv)
     rclcpp::init(argc, argv);
     signal(SIGINT, signal_handler);
     node = std::make_shared<ElmoMasterNode>();
-    rclcpp::spin(node);
+    // Multi-threaded spinning
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
     return 0;
 }

@@ -1,5 +1,4 @@
 #include "elmo_master/elmo_master_node.hpp"
-
 // yaml
 #include <yaml-cpp/yaml.h>
 #include "ament_index_cpp/get_package_share_directory.hpp"
@@ -11,9 +10,12 @@
 #include <fcntl.h>
 
 ElmoMasterNode::ElmoMasterNode()
-    : Node("elmo_master"), current_state_(FSMState::STOP), can_socket_(-1)
+    : Node("elmo_master"), current_state_(FSMState::STOP), sync_action_(SYNCAction::DISABLE_SYNC), can_socket_(-1) 
 {
     RCLCPP_WARN(this->get_logger(), "[canX][Master] ElmoMasterNode started...");
+    // Initialize callback groups
+    service_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    sync_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     // Init
     init_params();
     init_can_devices(can_config_file_);
@@ -24,24 +26,33 @@ ElmoMasterNode::ElmoMasterNode()
     // Services
     start_service_ = this->create_service<std_srvs::srv::Trigger>(
         "elmo_start",
-        std::bind(&ElmoMasterNode::handle_start, this, std::placeholders::_1, std::placeholders::_2));
+        std::bind(&ElmoMasterNode::handle_start, this, std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default, service_cb_group_);
     exit_service_ = this->create_service<std_srvs::srv::Trigger>(
         "elmo_exit",
-        std::bind(&ElmoMasterNode::handle_exit, this, std::placeholders::_1, std::placeholders::_2));
+        std::bind(&ElmoMasterNode::handle_exit, this, std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default, service_cb_group_);
     stop_service_ = this->create_service<std_srvs::srv::Trigger>(
         "elmo_stop",
-        std::bind(&ElmoMasterNode::handle_stop, this, std::placeholders::_1, std::placeholders::_2));
+        std::bind(&ElmoMasterNode::handle_stop, this, std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default, service_cb_group_);
     recover_service_ = this->create_service<std_srvs::srv::Trigger>(
         "elmo_recover",
-        std::bind(&ElmoMasterNode::handle_recover, this, std::placeholders::_1, std::placeholders::_2));
+        std::bind(&ElmoMasterNode::handle_recover, this, std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default, service_cb_group_);
     reset_service_ = this->create_service<std_srvs::srv::Trigger>(
         "elmo_reset",
-        std::bind(&ElmoMasterNode::handle_reset, this, std::placeholders::_1, std::placeholders::_2));
+        std::bind(&ElmoMasterNode::handle_reset, this, std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default, service_cb_group_);
     // Publishers
-    current_velocity_pub_ = this->create_publisher<std_msgs::msg::Float32>("current_velocity", 10);
+    actual_velocity_pub_ = this->create_publisher<std_msgs::msg::Float32>("elmo/actual_velocity", 10);
+    actual_position_pub_ = this->create_publisher<std_msgs::msg::Float32>("elmo/actual_position", 10);
+    elmo_status_pub_ = this->create_publisher<std_msgs::msg::String>("elmo/status", 10);
     // Subscribers
-    target_velocity_sub_ = this->create_subscription<std_msgs::msg::Float32>("target_velocity", 10,
-                                                                             std::bind(&ElmoMasterNode::target_velocity_callback, this, std::placeholders::_1));
+    target_velocity_sub_ = this->create_subscription<std_msgs::msg::Float32>("elmo/target_velocity", 10,
+        std::bind(&ElmoMasterNode::target_velocity_callback, this, std::placeholders::_1));
+    target_position_sub_ = this->create_subscription<std_msgs::msg::Float32>("elmo/target_position", 10,
+        std::bind(&ElmoMasterNode::target_position_callback, this, std::placeholders::_1));
 }
 
 ElmoMasterNode::~ElmoMasterNode()
@@ -51,38 +62,139 @@ ElmoMasterNode::~ElmoMasterNode()
         close(can_socket_);
         RCLCPP_INFO(this->get_logger(), "[%s][Master] Socket closed", can_interface_.c_str());
     }
-    RCLCPP_INFO(this->get_logger(), "[%s][Master] ElmoMasterNode is being destroyed", can_interface_.c_str());
+    RCLCPP_WARN(this->get_logger(), "[%s][Master] ElmoMasterNode is being destroyed", can_interface_.c_str());
 }
 
-void ElmoMasterNode::send_sync_message()
+void ElmoMasterNode::sync_callback()
 {
-    if (enable_sync_)
+    if (sync_action_ == SYNCAction::DISABLE_SYNC)
     {
-        // Calculate the time since the last SYNC message
-        double passed_time = (this->now() - sync_start_time_).seconds();
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(2) << passed_time;
-        // create SYNC message
-        CANMessage sync_msg = {0x080, 0, {}, COBType::SYNC, "(SYNC)" + ss.str() + "s"};
-        // send SYNC message
-        if (!send_can_message(sync_msg, 0))
+        sync_start_time_ = this->now();
+        return;
+    }
+    else if (sync_action_ == SYNCAction::RESET_AND_ENABLE_DEVICE)
+    {
+        for (auto &device : can_devices_)
         {
-            RCLCPP_ERROR(this->get_logger(), "[%s][Master] Failed to send SYNC message", can_interface_.c_str());
-            transit_to_exit();
-            return;
+            uint8_t node_id = device.id;
+            uint32_t cob_id = static_cast<uint32_t>(0x200 + node_id);
+            switch (device.status)
+            {
+                case DeviceStatus::FAULT:
+                case DeviceStatus::NOT_READY_TO_SWITCH_ON:
+                case DeviceStatus::QUICK_STOP_ACTIVE:
+                {
+                    // Fault Reset
+                    CANMessage enable_msg_01 = {cob_id, 7, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
+                        "(RPDO1) CW : Fault Reset"};
+                    if (!send_can_message(enable_msg_01, node_id)) { transit_to_exit(); return; }
+                    device.status = DeviceStatus::SWITCH_ON_DISABLED;
+                    break;
+                }
+                case DeviceStatus::SWITCH_ON_DISABLED:
+                {
+                    // Shutdown
+                    CANMessage enable_msg_02 = {cob_id, 7, {0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
+                        "(RPDO1) CW : Shutdown"};
+                    if (!send_can_message(enable_msg_02, node_id)) { transit_to_exit(); return; }
+                    device.status = DeviceStatus::READY_TO_SWITCH_ON;
+                    break;
+                }
+                case DeviceStatus::READY_TO_SWITCH_ON:
+                {
+                    // Switch ON
+                    CANMessage enable_msg_03 = {cob_id, 7, {0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
+                        "(RPDO1) CW : Switch On"};
+                    if (!send_can_message(enable_msg_03, node_id)) { transit_to_exit(); return; }
+                    device.status = DeviceStatus::SWITCHED_ON;
+                    break;
+                }
+                case DeviceStatus::SWITCHED_ON:
+                {
+                    // Enable Operation
+                    CANMessage enable_msg_04;
+                    if (device.type == "throttle")
+                    {
+                        enable_msg_04 = {cob_id, 7, {0x0F, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
+                            "(RPDO1) CW : Enable Operation (Throttle)"};
+                    }
+                    else if (device.type == "steering")
+                    {
+                        enable_msg_04 = {cob_id, 7, {0x0F, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
+                            "(RPDO1) CW : Enable Operation (Steering)"};
+                    }
+                    if (!send_can_message(enable_msg_04, node_id)) { transit_to_exit(); return; }
+                    device.status = DeviceStatus::OPERATION_ENABLED;
+                    break;
+                }
+                case DeviceStatus::OPERATION_ENABLED:
+                {
+                    break;
+                }
+                default:
+                {
+                    RCLCPP_ERROR(this->get_logger(), "[%s][Master] Invalid Device Status", can_interface_.c_str());
+                    transit_to_exit();
+                    return;
+                }
+            }
         }
+    }
+    else if (sync_action_ == SYNCAction::STOP_DEVICE)
+    {
+        for (auto &device : can_devices_)
+        {
+            uint8_t node_id = device.id;
+            uint32_t cob_id = static_cast<uint32_t>(0x200 + node_id);
+            switch (device.status)
+            {
+                case DeviceStatus::SWITCH_ON_DISABLED:
+                {
+                    break;
+                }
+                case DeviceStatus::QUICK_STOP_ACTIVE:
+                {
+                    device.status = DeviceStatus::SWITCH_ON_DISABLED;
+                    sync_cv_.notify_all();
+                    break;
+                }
+                default:
+                {
+                    // Quick Stop
+                    CANMessage stop_msg = {cob_id, 7, {0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
+                        "(RPDO1) CW : Quick Stop"};
+                    if (!send_can_message(stop_msg, node_id)) { transit_to_exit(); return; }
+                    device.status = DeviceStatus::QUICK_STOP_ACTIVE;
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    else if (sync_action_ == SYNCAction::PDO_CONTROL)
+    {
+
     }
     else
     {
-        sync_start_time_ = this->now();
+        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Invalid SYNC Action", can_interface_.c_str());
+        transit_to_exit();
+        return;
     }
+    // Send SYNC message
+    double passed_time = (this->now() - sync_start_time_).seconds();
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(2) << passed_time;
+    CANMessage sync_msg = {0x080, 0, {}, COBType::SYNC, "(SYNC)" + ss.str() + "s"};
+    if (!send_can_message(sync_msg, 0)) { transit_to_exit(); return; }
 }
 
 void ElmoMasterNode::init_sync_timer()
 {
     sync_start_time_ = this->now();
     sync_timer_ = this->create_wall_timer(std::chrono::milliseconds(sync_interval_ms_),
-                                          std::bind(&ElmoMasterNode::send_sync_message, this));
+                                          std::bind(&ElmoMasterNode::sync_callback, this),
+                                          sync_cb_group_);
 }
 
 bool ElmoMasterNode::send_can_message(const CANMessage &message, uint8_t node_id)
@@ -141,7 +253,7 @@ bool ElmoMasterNode::send_and_check_can_message(const CANMessage &message, uint8
         timeout.tv_usec = sleep_duration_us;
         // poll the socket
         int ret = select(can_socket_ + 1, &readfds, nullptr, nullptr, &timeout);
-        RCLCPP_WARN(this->get_logger(), "[%s][Master] select ret: %d", can_interface_.c_str(), ret); // [DEBUG]
+        // RCLCPP_WARN(this->get_logger(), "[%s][Master] select ret: %d", can_interface_.c_str(), ret); // [DEBUG] 
         if (ret < 0)
         {
             RCLCPP_ERROR(this->get_logger(), "[%s][Master] socket select, NodeID %d", can_interface_.c_str(), node_id);
@@ -256,6 +368,7 @@ void ElmoMasterNode::init_can_devices(const std::string &config_file)
             can_device.id = device["node_id"].as<int>();
             can_device.name = device["node_name"].as<std::string>();
             can_device.type = device["node_type"].as<std::string>();
+            can_device.status = DeviceStatus::NOT_READY_TO_SWITCH_ON;
             can_devices_.push_back(can_device);
         }
         RCLCPP_WARN(this->get_logger(), "[%s][Master] Loaded %zu CAN devices from config file %s",
@@ -427,19 +540,26 @@ void ElmoMasterNode::transit_to_ready()
     }
     RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to READY State...", can_interface_.c_str());
     // Set all nodes to operational
+    std::unique_lock<std::mutex> lock(sync_mutex_);
     for (const auto &device : can_devices_)
     {
         uint8_t node_id = device.id;
         CANMessage set_operational_msg = {0x000, 2, {0x01, node_id}, COBType::NMT, "(NMT) Set Node to Operational"};
         if (!send_can_message(set_operational_msg, node_id))
         {
+            lock.unlock();
             transit_to_exit(true);
             return;
         }
     }
+    lock.unlock();
     RCLCPP_WARN(this->get_logger(), "[%s][Master] SYNC enabled", can_interface_.c_str());
     // Enable SYNC
-    enable_sync_ = true;
+    {
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        sync_start_time_ = this->now();
+        sync_action_ = SYNCAction::PDO_CONTROL;
+    }
     // Transit to READY state
     current_state_ = FSMState::READY;
     RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s",
@@ -451,37 +571,31 @@ void ElmoMasterNode::transit_to_op()
     if (current_state_ == FSMState::READY || current_state_ == FSMState::STOP)
     {
         RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to OP State...", can_interface_.c_str());
-        // [TODO] Implement OP state behavior, such as enabling motor control
-        // for (const auto &device : can_devices_)
-        // {
-        //     uint8_t node_id = device.id;
-        //     uint32_t cob_id = static_cast<uint32_t>(0x200 + node_id);
-        //     // create Device Enable messages
-        //     CANMessage enable_msg_01 = {cob_id, 7, {0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
-        //         "(RPDO1) CW: Fault Reset"};
-        //     CANMessage enable_msg_02 = {cob_id, 7, {0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
-        //         "(RPDO1) CW: Shutdown"};
-        //     CANMessage enable_msg_03 = {cob_id, 7, {0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
-        //         "(RPDO1) CW: Switch ON Disabled"};
-        //     CANMessage enable_msg_04;
-        //     if (device.type == "throttle")
-        //     {
-        //         enable_msg_04 = {cob_id, 7, {0x0F, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
-        //             "(RPDO1) CW: Operation Enabled, MO: Profile Velocity"};
-        //     }
-        //     else if (device.type == "steering")
-        //     {
-        //         enable_msg_04 = {cob_id, 7, {0x0F, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
-        //             "(RPDO1) CW: Operation Enabled, MO: Profile Position"};
-        //     }
-        //     // send Device Enable messages
-        //     if (!send_and_check_can_message(enable_msg_01, node_id)) { transit_to_exit(); return; }
-        //     if (!send_and_check_can_message(enable_msg_02, node_id)) { transit_to_exit(); return; }
-        //     if (!send_and_check_can_message(enable_msg_03, node_id)) { transit_to_exit(); return; }
-        //     if (!send_and_check_can_message(enable_msg_04, node_id)) { transit_to_exit(); return; }
-        // }
+        {
+            std::lock_guard<std::mutex> lock(sync_mutex_);
+            sync_action_ = SYNCAction::RESET_AND_ENABLE_DEVICE;
+        }
+        bool all_enabled = false;
+        while(!all_enabled)
+        {
+            all_enabled = true;
+            {
+                std::lock_guard<std::mutex> lock(sync_mutex_);
+                for (const auto& device : can_devices_) 
+                { 
+                    if (device.status != DeviceStatus::OPERATION_ENABLED) 
+                    {
+                        all_enabled = false;
+                    }
+                }
+            }
+        }
         // Transit to OP state
         current_state_ = FSMState::OP;
+        {
+            std::lock_guard<std::mutex> lock(sync_mutex_);
+            sync_action_ = SYNCAction::PDO_CONTROL;
+        }
         RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s",
                     can_interface_.c_str(), state_to_string(current_state_).c_str());
     }
@@ -522,13 +636,14 @@ void ElmoMasterNode::transit_to_init()
     }
     RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to INIT state...", can_interface_.c_str());
     // Reset all nodes
+    std::unique_lock<std::mutex> lock(sync_mutex_);
     for (const auto &device : can_devices_)
     {
         uint8_t node_id = device.id;
         // create NMT Reset message
         CANMessage reset_msg = {0x000, 2, {0x81, node_id}, COBType::NMT, "(NMT) Reset Node"};
         // send NMT Reset message
-        if (!send_and_check_can_message(reset_msg, node_id)) { transit_to_exit(true); return; }
+        if (!send_and_check_can_message(reset_msg, node_id)) { lock.unlock(); transit_to_exit(true); return; }
     }
     // PDO mapping
     for (const auto &device : can_devices_)
@@ -608,48 +723,49 @@ void ElmoMasterNode::transit_to_init()
         CANMessage rpdo2_map_msg_07 = {cob_id, 8, {0x23, 0x01, 0x14, 0x01, 0x01, 0x03, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Enable RPDO2"};
         // send TPDO1 Mapping messages
-        if (!send_and_check_can_message(tpdo1_map_msg_01, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_02, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_03, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_04, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_05, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_06, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_07, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_08, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_09, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo1_map_msg_10, node_id)) { transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_01, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_02, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_03, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_04, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_05, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_06, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_07, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_08, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_09, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo1_map_msg_10, node_id)) { lock.unlock(); transit_to_exit(); return; }
         // send TPDO2 Mapping messages
-        if (!send_and_check_can_message(tpdo2_map_msg_01, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo2_map_msg_02, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo2_map_msg_03, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo2_map_msg_04, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo2_map_msg_05, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo2_map_msg_06, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo2_map_msg_07, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo2_map_msg_08, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(tpdo2_map_msg_09, node_id)) { transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_01, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_02, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_03, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_04, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_05, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_06, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_07, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_08, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(tpdo2_map_msg_09, node_id)) { lock.unlock(); transit_to_exit(); return; }
         // send RPDO1 Mapping messages
-        if (!send_and_check_can_message(rpdo1_map_msg_01, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo1_map_msg_02, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo1_map_msg_03, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo1_map_msg_04, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo1_map_msg_05, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo1_map_msg_06, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo1_map_msg_07, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo1_map_msg_08, node_id)) { transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo1_map_msg_01, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo1_map_msg_02, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo1_map_msg_03, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo1_map_msg_04, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo1_map_msg_05, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo1_map_msg_06, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo1_map_msg_07, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo1_map_msg_08, node_id)) { lock.unlock(); transit_to_exit(); return; }
         // send RPDO2 Mapping messages
-        if (!send_and_check_can_message(rpdo2_map_msg_01, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo2_map_msg_02, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo2_map_msg_03, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo2_map_msg_04, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo2_map_msg_05, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo2_map_msg_06, node_id)) { transit_to_exit(); return; }
-        if (!send_and_check_can_message(rpdo2_map_msg_07, node_id)) { transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo2_map_msg_01, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo2_map_msg_02, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo2_map_msg_03, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo2_map_msg_04, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo2_map_msg_05, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo2_map_msg_06, node_id)) { lock.unlock(); transit_to_exit(); return; }
+        if (!send_and_check_can_message(rpdo2_map_msg_07, node_id)) { lock.unlock(); transit_to_exit(); return; }
     }
     // Transit to INIT state
     current_state_ = FSMState::INIT;
     RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s",
                 can_interface_.c_str(), state_to_string(current_state_).c_str());
+    lock.unlock();
     // Transit to READY state
     transit_to_ready();
 }
@@ -664,20 +780,32 @@ void ElmoMasterNode::transit_to_exit(bool transition_error)
     }
     if (current_state_ != FSMState::INIT)
     {
+        std::unique_lock<std::mutex> lock(sync_mutex_);
+        sync_action_ = SYNCAction::STOP_DEVICE;
+        if (current_state_ != FSMState::READY)
+        {
+            sync_cv_.wait(lock, [this]() {
+            for (const auto &device : can_devices_)
+            {
+                if (device.status != DeviceStatus::SWITCH_ON_DISABLED) 
+                { 
+                    return false; 
+                }
+            }
+            return true;
+            });
+        }
         for (const auto &device : can_devices_)
         {
-            // create exit messages
-            // Quick Stop -> Shutdown -> Reset
             uint8_t node_id = device.id;
-            uint32_t cob_id = static_cast<uint32_t>(0x200 + node_id);
-            CANMessage exit_msg_01 = {cob_id, 7, {0x0B, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1, "(RPDO) Quick Stop"};
-            CANMessage exit_msg_02 = {0x000, 2, {0x81, node_id}, COBType::NMT, "(NMT) Reset Node"};
-            // send exit messages
-            if (!send_can_message(exit_msg_01, node_id)) { transit_to_exit(true); return; }
-            if (!send_and_check_can_message(exit_msg_02, node_id)) { transit_to_exit(true); return; }
+            // create exit message
+            CANMessage exit_msg = {0x000, 2, {0x81, node_id}, COBType::NMT, "(NMT) Reset Node"};
+            // send exit message
+            if (!send_and_check_can_message(exit_msg, node_id)) { lock.unlock(); }
         }
         // Stop SYNC
-        enable_sync_ = false;
+        sync_action_ = SYNCAction::DISABLE_SYNC;
+        lock.unlock();
     }
     if (transition_error)
     {
@@ -778,12 +906,26 @@ void ElmoMasterNode::handle_reset(const std_srvs::srv::Trigger::Request::SharedP
 
 void ElmoMasterNode::target_velocity_callback(const std_msgs::msg::Float32::SharedPtr msg)
 {
+    std::lock_guard<std::mutex> lock(sync_mutex_);
     target_velocity_ = msg->data;
     RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Velocity Received: %f", can_interface_.c_str(), target_velocity_);
     // [TODO] Implement velocity control logic
     // For now, just simulate publishing the current velocity
-    current_velocity_ = target_velocity_;
-    auto current_velocity_msg = std_msgs::msg::Float32();
-    current_velocity_msg.data = current_velocity_;
-    current_velocity_pub_->publish(current_velocity_msg);
+    actual_velocity_ = target_velocity_;
+    auto actual_velocity_msg = std_msgs::msg::Float32();
+    actual_velocity_msg.data = actual_velocity_;
+    actual_velocity_pub_->publish(actual_velocity_msg);
+}
+
+void ElmoMasterNode::target_position_callback(const std_msgs::msg::Float32::SharedPtr msg)
+{
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    target_position_ = msg->data;
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Position Received: %f", can_interface_.c_str(), target_position_);
+    // [TODO] Implement position control logic
+    // For now, just simulate publishing the current position
+    actual_position_ = target_position_;
+    auto actual_position_msg = std_msgs::msg::Float32();
+    actual_position_msg.data = actual_position_;
+    actual_position_pub_->publish(actual_position_msg);
 }
