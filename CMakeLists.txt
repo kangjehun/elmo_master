@@ -16,10 +16,13 @@ include_directories(
 # Find dependencies
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
+# - 3rd party libraries
+find_package(yaml-cpp REQUIRED)
 
 # Add the library
 ament_auto_add_library(${PROJECT_NAME}_lib SHARED
   src/${PROJECT_NAME}_node.cpp)
+target_link_libraries(${PROJECT_NAME}_lib yaml-cpp)
 
 # Add the executable
 ament_auto_add_executable(${PROJECT_NAME}_exe

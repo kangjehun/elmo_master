@@ -11,7 +11,8 @@ def generate_launch_description():
         #     output='screen',
         #     parameters=[
         #         {'type': 'combined' },
-        #         {'can_interface' : 'can0'}
+        #         {'can_interface' : 'can0'},
+        #         {'can_config_file' : 'config/elmo_can0.yaml'}
         #     ]
         # ),
         # CAN1
@@ -22,7 +23,8 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 {'type': 'combined'},
-                {'can_interface' : 'can1'}
+                {'can_interface' : 'can1'},
+                {'can_config_file' : 'config/elmo_can1.yaml'}
             ]
         )
     ])
