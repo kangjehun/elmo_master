@@ -25,23 +25,23 @@ ElmoMasterNode::ElmoMasterNode()
     transit_to_init();
     // Services
     start_service_ = this->create_service<std_srvs::srv::Trigger>(
-        "elmo_start",
+        "elmo/start",
         std::bind(&ElmoMasterNode::handle_start, this, std::placeholders::_1, std::placeholders::_2),
         rmw_qos_profile_services_default, service_cb_group_);
     exit_service_ = this->create_service<std_srvs::srv::Trigger>(
-        "elmo_exit",
+        "elmo/exit",
         std::bind(&ElmoMasterNode::handle_exit, this, std::placeholders::_1, std::placeholders::_2),
         rmw_qos_profile_services_default, service_cb_group_);
     stop_service_ = this->create_service<std_srvs::srv::Trigger>(
-        "elmo_stop",
+        "elmo/stop",
         std::bind(&ElmoMasterNode::handle_stop, this, std::placeholders::_1, std::placeholders::_2),
         rmw_qos_profile_services_default, service_cb_group_);
     recover_service_ = this->create_service<std_srvs::srv::Trigger>(
-        "elmo_recover",
+        "elmo/recover",
         std::bind(&ElmoMasterNode::handle_recover, this, std::placeholders::_1, std::placeholders::_2),
         rmw_qos_profile_services_default, service_cb_group_);
     reset_service_ = this->create_service<std_srvs::srv::Trigger>(
-        "elmo_reset",
+        "elmo/reset",
         std::bind(&ElmoMasterNode::handle_reset, this, std::placeholders::_1, std::placeholders::_2),
         rmw_qos_profile_services_default, service_cb_group_);
     // Publishers
@@ -70,6 +70,7 @@ void ElmoMasterNode::sync_callback()
     if (sync_action_ == SYNCAction::DISABLE_SYNC)
     {
         sync_start_time_ = this->now();
+        sync_cv_.notify_all();
         return;
     }
     else if (sync_action_ == SYNCAction::RESET_AND_ENABLE_DEVICE)
@@ -140,7 +141,7 @@ void ElmoMasterNode::sync_callback()
             }
         }
     }
-    else if (sync_action_ == SYNCAction::STOP_DEVICE)
+    else if (sync_action_ == SYNCAction::STOP_DEVICE || sync_action_ == SYNCAction::TERMINATE)
     {
         for (auto &device : can_devices_)
         {
@@ -150,6 +151,7 @@ void ElmoMasterNode::sync_callback()
             {
                 case DeviceStatus::SWITCH_ON_DISABLED:
                 {
+                    // sync_start_time_ = this->now();
                     break;
                 }
                 case DeviceStatus::QUICK_STOP_ACTIVE:
@@ -169,7 +171,10 @@ void ElmoMasterNode::sync_callback()
                 }
             }
         }
-        return;
+        if (sync_action_ == SYNCAction::TERMINATE)
+        {
+            return;
+        }
     }
     else if (sync_action_ == SYNCAction::PDO_CONTROL)
     {
@@ -391,22 +396,16 @@ void ElmoMasterNode::init_can_devices(const std::string &config_file)
     return;
 }
 
-std::string ElmoMasterNode::format_emergency_message(const struct can_frame &response)
+float ElmoMasterNode::rad_to_uu(float value) 
 {
-    std::stringstream ss;
-    ss
-        << std::endl
-        << "   Error Code = 0x" << std::hex << static_cast<int>(response.data[0]) << static_cast<int>(response.data[1])
-        << std::endl
-        << "   Error Register = 0x" << std::hex << static_cast<int>(response.data[2])
-        << std::endl
-        << "   Error Code = 0x" << static_cast<int>(response.data[3])
-        << std::endl
-        << "   Data Field 1 = 0x" << std::hex << static_cast<int>(response.data[4]) << static_cast<int>(response.data[5])
-        << std::endl
-        << "   Data Field 2 = 0x" << std::hex << static_cast<int>(response.data[6]) << static_cast<int>(response.data[7]);
+    // For now, just return the argument value itself
+    return value;
+}
 
-    return ss.str();
+float ElmoMasterNode::mps_to_uu(float value) 
+{
+    // For now, just return the argument value itself
+    return value;
 }
 
 uint32_t ElmoMasterNode::get_expected_response_id(const CANMessage &message, uint8_t node_id) const
@@ -430,6 +429,24 @@ uint32_t ElmoMasterNode::get_expected_response_id(const CANMessage &message, uin
                     can_interface_.c_str(), cobtype_to_string(message.cob_type).c_str(), node_id);
         return 0;
     }
+}
+
+std::string ElmoMasterNode::format_emergency_message(const struct can_frame &response)
+{
+    std::stringstream ss;
+    ss
+        << std::endl
+        << "   Error Code = 0x" << std::hex << static_cast<int>(response.data[0]) << static_cast<int>(response.data[1])
+        << std::endl
+        << "   Error Register = 0x" << std::hex << static_cast<int>(response.data[2])
+        << std::endl
+        << "   Error Code = 0x" << static_cast<int>(response.data[3])
+        << std::endl
+        << "   Data Field 1 = 0x" << std::hex << static_cast<int>(response.data[4]) << static_cast<int>(response.data[5])
+        << std::endl
+        << "   Data Field 2 = 0x" << std::hex << static_cast<int>(response.data[6]) << static_cast<int>(response.data[7]);
+
+    return ss.str();
 }
 
 COBType ElmoMasterNode::hex_to_cobtype(uint32_t cob_id)
@@ -618,7 +635,21 @@ void ElmoMasterNode::transit_to_stop()
     }
     RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to STOP State...", can_interface_.c_str());
     // [TODO] Implement STOP state behavior, such as quick-stop the device
-    // ...
+    std::unique_lock<std::mutex> lock(sync_mutex_);
+    sync_action_ = SYNCAction::STOP_DEVICE;
+    sync_cv_.wait(lock, 
+    [this]()
+    {
+        for (const auto& device : can_devices_)
+        {
+            if (device.status != DeviceStatus::SWITCH_ON_DISABLED)
+            {
+                return false;
+            }
+        }
+        return true;
+    });
+    lock.unlock();
     // Transit to STOP state
     current_state_ = FSMState::STOP;
     RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s",
@@ -637,6 +668,8 @@ void ElmoMasterNode::transit_to_init()
     RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to INIT state...", can_interface_.c_str());
     // Reset all nodes
     std::unique_lock<std::mutex> lock(sync_mutex_);
+    sync_action_ = SYNCAction::DISABLE_SYNC;
+    sync_cv_.wait(lock, [this]() { return sync_action_ == SYNCAction::DISABLE_SYNC; });
     for (const auto &device : can_devices_)
     {
         uint8_t node_id = device.id;
@@ -761,11 +794,11 @@ void ElmoMasterNode::transit_to_init()
         if (!send_and_check_can_message(rpdo2_map_msg_06, node_id)) { lock.unlock(); transit_to_exit(); return; }
         if (!send_and_check_can_message(rpdo2_map_msg_07, node_id)) { lock.unlock(); transit_to_exit(); return; }
     }
+    lock.unlock();
     // Transit to INIT state
     current_state_ = FSMState::INIT;
     RCLCPP_WARN(this->get_logger(), "[%s][Master] Current State: %s",
                 can_interface_.c_str(), state_to_string(current_state_).c_str());
-    lock.unlock();
     // Transit to READY state
     transit_to_ready();
 }
@@ -781,18 +814,20 @@ void ElmoMasterNode::transit_to_exit(bool transition_error)
     if (current_state_ != FSMState::INIT)
     {
         std::unique_lock<std::mutex> lock(sync_mutex_);
-        sync_action_ = SYNCAction::STOP_DEVICE;
+        sync_action_ = SYNCAction::TERMINATE;
         if (current_state_ != FSMState::READY)
         {
-            sync_cv_.wait(lock, [this]() {
-            for (const auto &device : can_devices_)
+            sync_cv_.wait(lock, 
+            [this]() 
             {
-                if (device.status != DeviceStatus::SWITCH_ON_DISABLED) 
-                { 
-                    return false; 
+                for (const auto &device : can_devices_)
+                {
+                    if (device.status != DeviceStatus::SWITCH_ON_DISABLED) 
+                    { 
+                        return false; 
+                    }
                 }
-            }
-            return true;
+                return true;
             });
         }
         for (const auto &device : can_devices_)
@@ -908,24 +943,22 @@ void ElmoMasterNode::target_velocity_callback(const std_msgs::msg::Float32::Shar
 {
     std::lock_guard<std::mutex> lock(sync_mutex_);
     target_velocity_ = msg->data;
-    RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Velocity Received: %f", can_interface_.c_str(), target_velocity_);
-    // [TODO] Implement velocity control logic
-    // For now, just simulate publishing the current velocity
-    actual_velocity_ = target_velocity_;
-    auto actual_velocity_msg = std_msgs::msg::Float32();
-    actual_velocity_msg.data = actual_velocity_;
-    actual_velocity_pub_->publish(actual_velocity_msg);
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Velocity Received: %f", 
+        can_interface_.c_str(), target_velocity_); // [DEBUG]
+    // TODO : convert target velocity unit from [m/s] to [uu] ; uu = userunit
+    target_velocity_ = mps_to_uu(target_velocity_);
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Velocity Converted: %f", 
+        can_interface_.c_str(), target_velocity_); // [DEBUG]
 }
 
 void ElmoMasterNode::target_position_callback(const std_msgs::msg::Float32::SharedPtr msg)
 {
     std::lock_guard<std::mutex> lock(sync_mutex_);
     target_position_ = msg->data;
-    RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Position Received: %f", can_interface_.c_str(), target_position_);
-    // [TODO] Implement position control logic
-    // For now, just simulate publishing the current position
-    actual_position_ = target_position_;
-    auto actual_position_msg = std_msgs::msg::Float32();
-    actual_position_msg.data = actual_position_;
-    actual_position_pub_->publish(actual_position_msg);
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Position Received: %f", 
+        can_interface_.c_str(), target_position_); // [DEBUG]
+    // TODO : convert target position unit from [rad] to [uu] ; uu = userunit
+    target_position_ = rad_to_uu(target_position_);
+    RCLCPP_INFO(this->get_logger(), "[%s][Master] Target Position Converted: %f", 
+        can_interface_.c_str(), target_position_); // [DEBUG]
 }

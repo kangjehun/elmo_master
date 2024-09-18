@@ -41,7 +41,8 @@ enum class SYNCAction
     DISABLE_SYNC,
     RESET_AND_ENABLE_DEVICE,
     STOP_DEVICE,
-    PDO_CONTROL
+    PDO_CONTROL,
+    TERMINATE
 };
 
 enum class DeviceStatus
@@ -89,17 +90,17 @@ private:
     void transit_to_ready();
     void transit_to_op();
     void transit_to_stop();
-    // void transit_to_init(bool first_init = false);
     void transit_to_init();
     void transit_to_exit(bool transition_error = false);
     bool send_and_check_can_message(const CANMessage &message, uint8_t node_id);
     bool send_can_message(const CANMessage &message, uint8_t node_id);
-    
     static COBType hex_to_cobtype(uint32_t cob_id);
     static std::string state_to_string(FSMState state);
     static std::string cobtype_to_string(COBType cob_type);
     static std::string format_emergency_message(const struct can_frame &response);
     uint32_t get_expected_response_id(const CANMessage &message, uint8_t node_id) const;
+    static float mps_to_uu(float target_velocity);
+    static float rad_to_uu(float target_position);
     // service callbacks
     void handle_start(const std_srvs::srv::Trigger::Request::SharedPtr request,
                       std_srvs::srv::Trigger::Response::SharedPtr response);
