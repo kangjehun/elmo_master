@@ -286,17 +286,24 @@ bool ElmoMasterNode::transit_to_ready()
     }
     RCLCPP_INFO(this->get_logger(), "[%s][Master] Transition to READY State...", can_interface_.c_str());
     // Set all nodes to operational
-    for (const auto &device : can_devices_)
+    CANMessage set_operational_msg = {0x000, 2, {0x01, 0x00}, COBType::NMT, "(NMT) Set All Nodes to Operational"};
+    if (!send_can_message(set_operational_msg, 0))
     {
-        uint8_t node_id = device.id;
-        CANMessage set_operational_msg = {0x000, 2, {0x01, node_id}, COBType::NMT, "(NMT) Set Node to Operational"};
-        if (!send_can_message(set_operational_msg, node_id))
-        {
-            lock.unlock();
-            transit_to_exit(true);
-            return false;
-        }
+        lock.unlock();
+        transit_to_exit(true);
+        return false;
     }
+    // for (const auto &device : can_devices_)
+    // {
+    //     uint8_t node_id = device.id;
+    //     CANMessage set_operational_msg = {0x000, 2, {0x01, node_id}, COBType::NMT, "(NMT) Set Node to Operational"};
+    //     if (!send_can_message(set_operational_msg, node_id))
+    //     {
+    //         lock.unlock();
+    //         transit_to_exit(true);
+    //         return false;
+    //     }
+    // }
     RCLCPP_WARN(this->get_logger(), "[%s][Master] SYNC enabled", can_interface_.c_str());
     sync_start_time_ = this->now();
     sync_action_ = SYNCAction::ENABLE_SYNC;
@@ -429,9 +436,10 @@ bool ElmoMasterNode::transit_to_init(bool first_init)
     {
         uint8_t node_id = device.id;
         uint32_t cob_id = static_cast<uint32_t>(0x600 + node_id);
+        RCLCPP_INFO(this->get_logger(), "node-id : %d", node_id);
         // create TPDO1 Mapping messages
-        CANMessage tpdo1_map_msg_01 = {cob_id, 8, {0x23, 0x00, 0x18, 0x01, 0x81, 0x01, 0x00, 0x80}, COBType::RSDO, 
-            "(SDO, Wreq) Disable TPDO1"};
+        CANMessage tpdo1_map_msg_01 = {cob_id, 8, {0x23, 0x00, 0x18, 0x01, static_cast<uint8_t>(0x80 + node_id), 0x01, 0x00, 0x80}, COBType::RSDO, 
+            "(SDO, Wreq) Disable TPDO1"}; 
         CANMessage tpdo1_map_msg_02 = {cob_id, 8, {0x2F, 0x00, 0x18, 0x02, 0x01, 0x00, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Set Transmission 1sync"};
         CANMessage tpdo1_map_msg_03 = {cob_id, 8, {0x2B, 0x00, 0x18, 0x03, 0x64, 0x00, 0x00, 0x00}, COBType::RSDO, 
@@ -448,10 +456,10 @@ bool ElmoMasterNode::transit_to_init(bool first_init)
             "(SDO, Wreq) TPDO1 mapping: Sub 03, Velocity Actual Value, 32bit"};
         CANMessage tpdo1_map_msg_09 = {cob_id, 8, {0x2F, 0x00, 0x1A, 0x00, 0x03, 0x00, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Rewrite TPDO1 entry number to 3"};
-        CANMessage tpdo1_map_msg_10 = {cob_id, 8, {0x23, 0x00, 0x18, 0x01, 0x81, 0x01, 0x00, 0x00}, COBType::RSDO, 
+        CANMessage tpdo1_map_msg_10 = {cob_id, 8, {0x23, 0x00, 0x18, 0x01, static_cast<uint8_t>(0x80 + node_id), 0x01, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Enable TPDO1"};
         // create TPDO2 Mapping messages
-        CANMessage tpdo2_map_msg_01 = {cob_id, 8, {0x23, 0x01, 0x18, 0x01, 0x81, 0x02, 0x00, 0x80}, COBType::RSDO, 
+        CANMessage tpdo2_map_msg_01 = {cob_id, 8, {0x23, 0x01, 0x18, 0x01, static_cast<uint8_t>(0x80 + node_id), 0x02, 0x00, 0x80}, COBType::RSDO, 
             "(SDO, Wreq) Disable TPDO2"};
         CANMessage tpdo2_map_msg_02 = {cob_id, 8, {0x2F, 0x01, 0x18, 0x02, 0x01, 0x00, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Set Transmission 1sync"};
@@ -467,10 +475,10 @@ bool ElmoMasterNode::transit_to_init(bool first_init)
             "(SDO, Wreq) TPDO2 mapping: Sub 02, Torque Actual Value, 32bit"};
         CANMessage tpdo2_map_msg_08 = {cob_id, 8, {0x2F, 0x01, 0x1A, 0x00, 0x02, 0x00, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Rewrite TPDO2 entry number to 2"};
-        CANMessage tpdo2_map_msg_09 = {cob_id, 8, {0x23, 0x01, 0x18, 0x01, 0x81, 0x02, 0x00, 0x00}, COBType::RSDO, 
+        CANMessage tpdo2_map_msg_09 = {cob_id, 8, {0x23, 0x01, 0x18, 0x01, static_cast<uint8_t>(0x80 + node_id), 0x02, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Enable TPDO2"};
         // create RPDO1 Mapping messages
-        CANMessage rpdo1_map_msg_01 = {cob_id, 8, {0x23, 0x00, 0x14, 0x01, 0x01, 0x02, 0x00, 0x80}, COBType::RSDO, 
+        CANMessage rpdo1_map_msg_01 = {cob_id, 8, {0x23, 0x00, 0x14, 0x01, static_cast<uint8_t>(0x00 + node_id), 0x02, 0x00, 0x80}, COBType::RSDO, 
             "(SDO, Wreq) Disable RPDO1"};
         CANMessage rpdo1_map_msg_02 = {cob_id, 8, {0x2F, 0x00, 0x14, 0x02, 0x01, 0x00, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Set Transmission 1sync"};
@@ -484,10 +492,10 @@ bool ElmoMasterNode::transit_to_init(bool first_init)
             "(SDO, Wreq) RPDO1 mapping: Sub 03, Target Velocity, 32bit"};
         CANMessage rpdo1_map_msg_07 = {cob_id, 8, {0x2F, 0x00, 0x16, 0x00, 0x03, 0x00, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Rewrite RPDO1 entry number to 2"};
-        CANMessage rpdo1_map_msg_08 = {cob_id, 8, {0x23, 0x00, 0x14, 0x01, 0x01, 0x02, 0x00, 0x00}, COBType::RSDO, 
+        CANMessage rpdo1_map_msg_08 = {cob_id, 8, {0x23, 0x00, 0x14, 0x01, static_cast<uint8_t>(0x00 + node_id), 0x02, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Enable RPDO1"};
         // create RPDO2 Mapping messages
-        CANMessage rpdo2_map_msg_01 = {cob_id, 8, {0x23, 0x01, 0x14, 0x01, 0x01, 0x03, 0x00, 0x80}, COBType::RSDO, 
+        CANMessage rpdo2_map_msg_01 = {cob_id, 8, {0x23, 0x01, 0x14, 0x01, static_cast<uint8_t>(0x00 + node_id), 0x03, 0x00, 0x80}, COBType::RSDO, 
             "(SDO, Wreq) Disable RPDO2"};
         CANMessage rpdo2_map_msg_02 = {cob_id, 8, {0x2F, 0x01, 0x14, 0x02, 0x01, 0x00, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Set Transmission 1sync"};
@@ -499,7 +507,7 @@ bool ElmoMasterNode::transit_to_init(bool first_init)
             "(SDO, Wreq) RPDO2 mapping: Sub 02, Target Torque, 32bit"};
         CANMessage rpdo2_map_msg_06 = {cob_id, 8, {0x2F, 0x01, 0x16, 0x00, 0x02, 0x00, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Rewrite RPDO2 entry number to 2"};
-        CANMessage rpdo2_map_msg_07 = {cob_id, 8, {0x23, 0x01, 0x14, 0x01, 0x01, 0x03, 0x00, 0x00}, COBType::RSDO, 
+        CANMessage rpdo2_map_msg_07 = {cob_id, 8, {0x23, 0x01, 0x14, 0x01, static_cast<uint8_t>(0x00 + node_id), 0x03, 0x00, 0x00}, COBType::RSDO, 
             "(SDO, Wreq) Enable RPDO2"};
         // send TPDO1 Mapping messages
         if (!send_and_check_can_message(tpdo1_map_msg_01, node_id)) { lock.unlock(); transit_to_exit(); return false; }
@@ -698,13 +706,14 @@ bool ElmoMasterNode::send_and_check_can_message(const CANMessage &message, uint8
     return false;
 }
 
-bool ElmoMasterNode::check_pdo_message(uint8_t node_id)
+bool ElmoMasterNode::check_pdo_message()
 {
     struct can_frame response;
     const int sleep_duration_us = 10000; // 10ms
     const int max_attempts = 100;        // 10ms * 100attemps = 1s
-    bool tpdo1_received = false;
-    bool tpdo2_received = false;
+
+    std::vector<bool> tpdo1_received(can_devices_.size(), false);
+    std::vector<bool> tpdo2_received(can_devices_.size(), false);
 
     for (int attempts = 0; attempts < max_attempts; ++attempts)
     {
@@ -720,7 +729,7 @@ bool ElmoMasterNode::check_pdo_message(uint8_t node_id)
         int ret = select(can_socket_ + 1, &readfds, nullptr, nullptr, &timeout);
         if (ret < 0)
         {
-            RCLCPP_ERROR(this->get_logger(), "[%s][Master] socket select, NodeID %d", can_interface_.c_str(), node_id);
+            RCLCPP_ERROR(this->get_logger(), "[%s][Master] socket select", can_interface_.c_str());
             return false;
         }
         else if (ret > 0 && FD_ISSET(can_socket_, &readfds))
@@ -728,70 +737,67 @@ bool ElmoMasterNode::check_pdo_message(uint8_t node_id)
             int nbytes = read(can_socket_, &response, sizeof(response));
             if (nbytes > 0)
             {
-                // Check EMCY Error
-                if (response.can_id == static_cast<canid_t>(0x080 + node_id))
+                uint8_t node_id = response.can_id & 0x7F; // Extract node ID from the CAN ID
+                if (node_id > 0 && node_id <= can_devices_.size())
                 {
-                    RCLCPP_ERROR(this->get_logger(), "[%s][Node%02d] - EMCY : %s",
-                                 can_interface_.c_str(), node_id, format_emergency_message(response).c_str());
-                    return false;
-                }
-                // Check TPDO1
-                else if (response.can_id == static_cast<canid_t>(0x180 + node_id))
-                {
-                    tpdo1_received = true;
-                    // Extract actual velocity value
-                    memcpy(can_devices_[node_id - 1].actual_velocity.bytes, response.data + 3, 4);
-                    std::reverse(std::begin(can_devices_[node_id - 1].actual_velocity.bytes),
-                                 std::end(can_devices_[node_id - 1].actual_velocity.bytes));
-                    int32_t velocity_uu = 
-                        (static_cast<int32_t>(can_devices_[node_id - 1].actual_velocity.bytes[0]) << 24) |
-                        (static_cast<int32_t>(can_devices_[node_id - 1].actual_velocity.bytes[1]) << 16) |
-                        (static_cast<int32_t>(can_devices_[node_id - 1].actual_velocity.bytes[2]) << 8)  |
-                        (static_cast<int32_t>(can_devices_[node_id - 1].actual_velocity.bytes[3]));
-                    RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - TPDO1 Actual Velocity : %d [uu]",
-                                can_interface_.c_str(), node_id, velocity_uu);
-                    RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - TPDO1 Actual Velocity : %f [m/s]",
-                                can_interface_.c_str(), node_id, uu_to_mps(velocity_uu));
-                }
-                // Check TPDO2
-                else if (response.can_id == static_cast<canid_t>(0x280 + node_id))
-                {
-                    tpdo2_received = true;
-                    // Extract actual position value
-                    memcpy(can_devices_[node_id - 1].actual_position.bytes, response.data, 4);
-                    std::reverse(std::begin(can_devices_[node_id - 1].actual_position.bytes),
-                                 std::end(can_devices_[node_id - 1].actual_position.bytes));
-                    int32_t position_uu =
-                        (static_cast<int32_t>(can_devices_[node_id - 1].actual_position.bytes[0]) << 24) |
-                        (static_cast<int32_t>(can_devices_[node_id - 1].actual_position.bytes[1]) << 16) |
-                        (static_cast<int32_t>(can_devices_[node_id - 1].actual_position.bytes[2]) << 8)  |
-                        (static_cast<int32_t>(can_devices_[node_id - 1].actual_position.bytes[3]));
-                    RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - TPDO2 Actual Position : %d [uu]",
-                                can_interface_.c_str(), node_id, position_uu);
-                    RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - TPDO2 Actual Position : %f [rad]",
-                                can_interface_.c_str(), node_id, uu_to_rad(position_uu));
-                }
-                else
-                {
-                    RCLCPP_ERROR(this->get_logger(), 
-                                 "[%s][Node%02d] - Unexpected response (%s) during PDO check",
-                                 can_interface_.c_str(), node_id,
-                                 cobtype_to_string(hex_to_cobtype(response.can_id)).c_str());
-                    return false;
-                }
-                // Check both TPDO1 and TPDO2 received
-                if (tpdo1_received && tpdo2_received)
-                {
-                    RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] → [Master] OK", can_interface_.c_str(), node_id);
-                    return true;
+                    // Check EMCY Error
+                    if (response.can_id == static_cast<canid_t>(0x080 + node_id))
+                    {
+                        RCLCPP_ERROR(this->get_logger(), "[%s][Node%02d] - EMCY : %s",
+                                     can_interface_.c_str(), node_id, format_emergency_message(response).c_str());
+                        return false;
+                    }
+                    // Check TPDO1
+                    else if (response.can_id == static_cast<canid_t>(0x180 + node_id))
+                    {
+                        tpdo1_received[node_id - 1] = true;
+                        // Extract actual velocity value
+                        memcpy(can_devices_[node_id - 1].actual_velocity.bytes, response.data + 3, 4);
+                        std::reverse(std::begin(can_devices_[node_id - 1].actual_velocity.bytes),
+                                     std::end(can_devices_[node_id - 1].actual_velocity.bytes));
+                        int32_t velocity_uu = 
+                            (static_cast<int32_t>(can_devices_[node_id - 1].actual_velocity.bytes[0]) << 24) |
+                            (static_cast<int32_t>(can_devices_[node_id - 1].actual_velocity.bytes[1]) << 16) |
+                            (static_cast<int32_t>(can_devices_[node_id - 1].actual_velocity.bytes[2]) << 8)  |
+                            (static_cast<int32_t>(can_devices_[node_id - 1].actual_velocity.bytes[3]));
+                        RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - TPDO1 Actual Velocity : %d [uu]",
+                                    can_interface_.c_str(), node_id, velocity_uu);
+                        RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - TPDO1 Actual Velocity : %f [m/s]",
+                                    can_interface_.c_str(), node_id, uu_to_mps(velocity_uu));
+                    }
+                    // Check TPDO2
+                    else if (response.can_id == static_cast<canid_t>(0x280 + node_id))
+                    {
+                        tpdo2_received[node_id - 1] = true;
+                        // Extract actual position value
+                        memcpy(can_devices_[node_id - 1].actual_position.bytes, response.data, 4);
+                        std::reverse(std::begin(can_devices_[node_id - 1].actual_position.bytes),
+                                     std::end(can_devices_[node_id - 1].actual_position.bytes));
+                        int32_t position_uu =
+                            (static_cast<int32_t>(can_devices_[node_id - 1].actual_position.bytes[0]) << 24) |
+                            (static_cast<int32_t>(can_devices_[node_id - 1].actual_position.bytes[1]) << 16) |
+                            (static_cast<int32_t>(can_devices_[node_id - 1].actual_position.bytes[2]) << 8)  |
+                            (static_cast<int32_t>(can_devices_[node_id - 1].actual_position.bytes[3]));
+                        RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - TPDO2 Actual Position : %d [uu]",
+                                    can_interface_.c_str(), node_id, position_uu);
+                        RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - TPDO2 Actual Position : %f [rad]",
+                                    can_interface_.c_str(), node_id, uu_to_rad(position_uu));
+                    }
+                    // Check both TPDO1 and TPDO2 received
+                    if (tpdo1_received[node_id - 1] && tpdo2_received[node_id - 1])
+                    {
+                        RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] → [Master] OK", can_interface_.c_str(), node_id);
+                        return true;
+                    }
                 }
             }
         }
         usleep(sleep_duration_us);
     }
-    RCLCPP_ERROR(this->get_logger(), "[%s][Master] socket read timeout, NodeID %d", can_interface_.c_str(), node_id);
+    RCLCPP_ERROR(this->get_logger(), "[%s][Master] socket read timeout", can_interface_.c_str());
     return false;
 }
+
 
 void ElmoMasterNode::publish_actual_values()
 {
@@ -1238,13 +1244,13 @@ void ElmoMasterNode::sync_callback()
     else if (sync_action_ == SYNCAction::PDO_CONTROL)
     {
         sync_cv_.notify_all();
+        if (! check_pdo_message()) { call_exit_service(); return; }
         for (auto &device : can_devices_)
         {
             uint8_t node_id = device.id;
             uint32_t cob_id_rpdo1 = static_cast<uint32_t>(0x200 + node_id);
             uint32_t cob_id_rpdo2 = static_cast<uint32_t>(0x300 + node_id);
             // Check PDO messages and update actual values
-            if (! check_pdo_message(node_id)) { call_exit_service(); return; }
             if (device.type == "throttle")
             {   
                 // create RPDO message

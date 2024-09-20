@@ -20,14 +20,14 @@ else
     fi
 fi
 
-# # Step 2 : Set CAN0 interface
-# echo "Checking if CAN0 interface is already up..."
-# if ip link show can0 | grep -q "state UP"; then
-#     echo "CAN0 interface is already up."
-# else
-#     echo "Setting up CAN0 interface..."
-#     sudo ip link set can0 up type can bitrate 500000 # 500kbps
-# fi
+# Step 2 : Set CAN0 interface
+echo "Checking if CAN0 interface is already up..."
+if ip link show can0 | grep -q "state UP"; then
+    echo "CAN0 interface is already up."
+else
+    echo "Setting up CAN0 interface..."
+    sudo ip link set can0 up type can bitrate 500000 # 500kbps
+fi
 
 # Step 3 : Set CAN1 interface
 echo "Checking if CAN1 interface is already up..."
@@ -39,14 +39,14 @@ else
 fi
 
 # Step 4 : Verify CAN0 channel ID
-# echo "Checking CAN0 channel ID..."
-# CAN0_CHANNEL_ID=$(cat /sys/class/net/can0/peak_usb/can_channel_id 2>/dev/null)
-# if [ "$CAN0_CHANNEL_ID" != "00000000" ]; then
-#     print_error "Error: CAN0 channel ID is incorrect or not available."
-#     exit 1
-# else 
-#     echo "CAN0 channel ID is correct."
-# fi
+echo "Checking CAN0 channel ID..."
+CAN0_CHANNEL_ID=$(cat /sys/class/net/can0/peak_usb/can_channel_id 2>/dev/null)
+if [ "$CAN0_CHANNEL_ID" != "00000000" ]; then
+    print_error "Error: CAN0 channel ID is incorrect or not available."
+    exit 1
+else 
+    echo "CAN0 channel ID is correct."
+fi
 
 # Step 5: Verify CAN1 channel ID
 echo "Checking CAN1 channel ID..."

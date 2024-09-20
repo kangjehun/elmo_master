@@ -115,7 +115,7 @@ private:
     bool transit_to_exit(bool transition_error = false);
     bool send_can_message(const CANMessage &message, uint8_t node_id);
     bool send_and_check_can_message(const CANMessage &message, uint8_t node_id);
-    bool check_pdo_message(uint8_t node_id);
+    bool check_pdo_message();
     void publish_actual_values();
     COBType hex_to_cobtype(uint32_t cob_id) const;
     std::string state_to_string(FSMState state) const;
