@@ -5,6 +5,7 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 // FSM States
 enum class FSMState {
@@ -148,7 +149,7 @@ private:
     // publishers
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr actual_velocity_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr actual_position_pub_;
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr elmo_status_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr elmo_status_pub_;
     // subscribers
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_sub_;
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_position_sub_;
@@ -184,6 +185,7 @@ private:
     int sync_interval_ms_;
     int sync_count_;
     int can_socket_;
+    bool elmo_state_;
 };
 
 #endif // ELMO_MASTER_NODE_HPP

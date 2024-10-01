@@ -1,9 +1,6 @@
 master:
   sync_interval_ms: 10 # 10ms, 100Hz
 nodes:
-  # - node_id: 1
-  #   node_name: "throttle_fr"
-  #   node_type: "throttle"
   - node_id: 1
     node_name: "steering_fr"
     node_type: "steering"

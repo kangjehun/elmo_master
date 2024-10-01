@@ -10,7 +10,7 @@
 #include <fcntl.h>
 
 ElmoMasterNode::ElmoMasterNode()
-    : Node("elmo_master"), current_state_(FSMState::SIBAL), sync_action_(SYNCAction::DISABLE_SYNC), sync_count_(0), can_socket_(-1) 
+    : Node("elmo_master"), current_state_(FSMState::SIBAL), sync_action_(SYNCAction::DISABLE_SYNC), sync_count_(0), can_socket_(-1), elmo_state_(false)
 {
     RCLCPP_WARN(this->get_logger(), "[canX][Master] ElmoMasterNode started...");
     // Initialize callback groups
@@ -47,7 +47,7 @@ ElmoMasterNode::ElmoMasterNode()
     // Publishers
     actual_velocity_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("elmo/actual_velocity", 10);
     actual_position_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("elmo/actual_position", 10);
-    elmo_status_pub_ = this->create_publisher<std_msgs::msg::String>("elmo/status", 10);
+    elmo_status_pub_ = this->create_publisher<std_msgs::msg::Bool>("f_pnd_initialized", 10);
     // Subscribers
     rclcpp::SubscriptionOptions position_sub_options;
     rclcpp::SubscriptionOptions velocity_sub_options;
@@ -170,7 +170,6 @@ void ElmoMasterNode::init_can_devices(const std::string &config_file)
         // resolve absolute path
         std::string package_share_directory = ament_index_cpp::get_package_share_directory("elmo_master");
         std::string full_path = package_share_directory + "/" + config_file;
-
         // load config file
         YAML::Node config = YAML::LoadFile(full_path);
         // extract CAN master info
@@ -293,17 +292,6 @@ bool ElmoMasterNode::transit_to_ready()
         transit_to_exit(true);
         return false;
     }
-    // for (const auto &device : can_devices_)
-    // {
-    //     uint8_t node_id = device.id;
-    //     CANMessage set_operational_msg = {0x000, 2, {0x01, node_id}, COBType::NMT, "(NMT) Set Node to Operational"};
-    //     if (!send_can_message(set_operational_msg, node_id))
-    //     {
-    //         lock.unlock();
-    //         transit_to_exit(true);
-    //         return false;
-    //     }
-    // }
     RCLCPP_WARN(this->get_logger(), "[%s][Master] SYNC enabled", can_interface_.c_str());
     sync_start_time_ = this->now();
     sync_action_ = SYNCAction::ENABLE_SYNC;
@@ -971,30 +959,17 @@ float ElmoMasterNode::uu_to_rad(int32_t position_uu)
 
 float ElmoMasterNode::rad_to_uu(float position) 
 {
-    // while (position > M_PI)
-    // {
-    //     RCLCPP_WARN(this->get_logger(), "[%s][Master] Radian Overflow: %f", can_interface_.c_str(), position);
-    //     position -= 2 * M_PI;
-    // }
-    // while (position < -M_PI)
-    // {
-    //     RCLCPP_WARN(this->get_logger(), "[%s][Master] Radian Underflow: %f", can_interface_.c_str(), position);
-    //     position += 2 * M_PI;
-    // }
     return static_cast<int32_t>(-0.5 * static_cast<float>(resolution_position_) 
                                 + static_cast<float>(resolution_position_) * ((position - min_position_) / (max_position_ - min_position_)));
 }
 
 float ElmoMasterNode::uu_to_mps(int32_t velocity_uu) 
 {
-    // return min_velocity_ + (max_velocity_ - min_velocity_) * static_cast<float>(velocity_uu - (-resolution_velocity_ / 2)) / static_cast<float>(resolution_velocity_);
     return static_cast<float>(velocity_uu * (2 * M_PI * wheel_radius_) / resolution_velocity_);
 }
 
 float ElmoMasterNode::mps_to_uu(float velocity) 
 {
-    // return static_cast<int32_t>(-0.5 * static_cast<float>(resolution_velocity_) 
-    //                             + static_cast<float>(resolution_velocity_) * ((velocity - min_velocity_) / (max_velocity_ - min_velocity_)));
     return static_cast<int32_t>(velocity * resolution_velocity_ / (2 * M_PI * wheel_radius_));
 }
 
@@ -1017,7 +992,6 @@ float ElmoMasterNode::rad_to_deg(float radian)
 float ElmoMasterNode::deg_to_rad(float degree)
 {
     float radian = degree * (M_PI / 180.0f);
-    // Wrap the angle between -pi and pi radians
     while (radian > M_PI)
     {
         RCLCPP_WARN(this->get_logger(), "[%s][Master] Radian Overflow: %f", can_interface_.c_str(), radian);
@@ -1082,8 +1056,6 @@ void ElmoMasterNode::target_velocity_callback(const std_msgs::msg::Float32MultiA
     std::unique_lock<std::mutex> lock(sync_mutex_);
     if (msg->data.size() != can_devices_.size())
     {
-        RCLCPP_ERROR(this->get_logger(), "[%s][Master] Target Velocity size mismatch with devices, can device size %lu and message size %lu",
-                     can_interface_.c_str(), can_devices_.size(), msg->data.size());
         lock.unlock();
         call_exit_service();
         return;
@@ -1093,8 +1065,6 @@ void ElmoMasterNode::target_velocity_callback(const std_msgs::msg::Float32MultiA
         float target_velocity = msg->data[i];
         if (fabs(target_velocity) >= max_velocity_)
         {
-            RCLCPP_WARN(this->get_logger(), "[%s][Master] Clipping Target Velocity for Node%02lu, %f",
-                        can_interface_.c_str(), i + 1, target_velocity);
             target_velocity = std::max(std::min(target_velocity, max_velocity_), - max_velocity_);
         }
         can_devices_[i].target_velocity.velocity_uu = mps_to_uu(target_velocity);
@@ -1118,8 +1088,6 @@ void ElmoMasterNode::target_position_callback(const std_msgs::msg::Float32MultiA
         float target_position = msg->data[i];
         if (fabs(target_position) >= max_position_)
         {
-            RCLCPP_WARN(this->get_logger(), "[%s][Master] Clipping Target Position for Node%02lu, %f",
-                        can_interface_.c_str(), i + 1, target_position);
             target_position = std::max(std::min(target_position, max_position_), min_position_);
         }
         can_devices_[i].target_position.position_uu = rad_to_uu(target_position);
@@ -1208,6 +1176,10 @@ void ElmoMasterNode::sync_callback()
     }
     else if (sync_action_ == SYNCAction::STOP_DEVICE || sync_action_ == SYNCAction::TERMINATE)
     {
+        elmo_state_ = false;
+        std_msgs::msg::Bool elmo_state_msg;
+        elmo_state_msg.data = elmo_state_;
+        elmo_status_pub_->publish(elmo_state_msg);
         for (auto &device : can_devices_)
         {
             uint8_t node_id = device.id;
@@ -1259,28 +1231,7 @@ void ElmoMasterNode::sync_callback()
                             << uu_to_mps(device.target_velocity.velocity_uu) << "[m/s]";
                 CANMessage rpdo_msg = {cob_id_rpdo1, 7, {0x0F, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO1,
                                        description.str()};
-                // Print the 4 bytes of target_velocity before reversing
                 int32_t velocity_uu = device.target_velocity.velocity_uu;
-                // RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - RPDO1 Target Velocity Bytes (Before Reverse): %02X %02X %02X %02X",
-                //             can_interface_.c_str(), node_id,
-                //             (velocity_uu >> 24) & 0xFF,
-                //             (velocity_uu >> 16) & 0xFF,
-                //             (velocity_uu >> 8) & 0xFF,
-                //             velocity_uu & 0xFF);
-                // // Reverse the byte order (Big Endian to Little Endian)
-                // int32_t reversed_velocity_uu = 
-                //     ((velocity_uu & 0xFF000000) >> 24) |
-                //     ((velocity_uu & 0x00FF0000) >> 8)  |
-                //     ((velocity_uu & 0x0000FF00) << 8)  |
-                //     ((velocity_uu & 0x000000FF) << 24);
-                // // Print the 4 bytes of target_velocity after reversing
-                // RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - RPDO1 Target Velocity Bytes (After Reverse): %02X %02X %02X %02X",
-                //             can_interface_.c_str(), node_id,
-                //             (reversed_velocity_uu >> 24) & 0xFF,
-                //             (reversed_velocity_uu >> 16) & 0xFF,
-                //             (reversed_velocity_uu >> 8) & 0xFF,
-                //             reversed_velocity_uu & 0xFF);
-                // memcpy(rpdo_msg.data + 3, &reversed_velocity_uu, sizeof(reversed_velocity_uu));
                 memcpy(rpdo_msg.data + 3, &velocity_uu, sizeof(velocity_uu));
                 if (!send_can_message(rpdo_msg, node_id)) { call_exit_service(); return; }
             }
@@ -1297,41 +1248,22 @@ void ElmoMasterNode::sync_callback()
                                   << ", TT : 0";
                 CANMessage rpdo2_msg = {cob_id_rpdo2, 6, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, COBType::RPDO2,
                                         rpdo2_description.str()};
-                // Print the 4 bytes of target_position before reversing
                 int32_t position_uu = device.target_position.position_uu;
-                // RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - RPDO2 Target Position Bytes (Before Reverse): %02X %02X %02X %02X",
-                //             can_interface_.c_str(), node_id,
-                //             (position_uu >> 24) & 0xFF,
-                //             (position_uu >> 16) & 0xFF,
-                //             (position_uu >> 8) & 0xFF,
-                //             position_uu & 0xFF);
-                // // Reverse the byte order (Big Endian to Little Endian)
-                // int32_t reversed_position_uu = 
-                //     ((position_uu & 0xFF000000) >> 24) |
-                //     ((position_uu & 0x00FF0000) >> 8)  |
-                //     ((position_uu & 0x0000FF00) << 8)  |
-                //     ((position_uu & 0x000000FF) << 24);
-                // // Print the 4 bytes of target_position after reversing
-                // RCLCPP_INFO(this->get_logger(), "[%s][Node%02d] - RPDO2 Target Position Bytes (After Reverse): %02X %02X %02X %02X",
-                //             can_interface_.c_str(), node_id,
-                //             (reversed_position_uu >> 24) & 0xFF,
-                //             (reversed_position_uu >> 16) & 0xFF,
-                //             (reversed_position_uu >> 8) & 0xFF,
-                //             reversed_position_uu & 0xFF);
-                // Copy reversed position into rpdo2_msg data
-                // memcpy(rpdo2_msg.data, &reversed_position_uu, sizeof(reversed_position_uu));
                 memcpy(rpdo2_msg.data, &position_uu, sizeof(position_uu));
                 if (!send_can_message(rpdo1_msg, node_id)) { call_exit_service(); return; }
                 if (!send_can_message(rpdo2_msg, node_id)) { call_exit_service(); return; }
                 device.set_point = !device.set_point;
             }    
             publish_actual_values();
-            // TODO : publish state
+            // publish state
+            elmo_state_ = true;
+            std_msgs::msg::Bool elmo_state_msg;
+            elmo_state_msg.data = elmo_state_;
+            elmo_status_pub_->publish(elmo_state_msg);
         }
     }
     else if (sync_action_ == SYNCAction::ENABLE_SYNC)
     {
-        // RCLCPP_INFO(this->get_logger(), "[%s][Master] SYNC Count: %d", can_interface_.c_str(), sync_count_); // [DEBUG]
         sync_cv_.notify_all();
     }
     else

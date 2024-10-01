@@ -8,8 +8,15 @@ This package controls the Hyundai PND modules via Elmo motor drivers using ROS2 
 
 To set up the Peak USB driver, run the following commands:
 ```bash
-./init_peakusb.sh
+cd /home/pnd/pnd_ws/src/Hyundai-KAIST_PnD/pnd_communications/elmo_master && ./init_peakusb.sh
 ros2 launch elmo_master elmo_master.launch.py
+ros2 launch teleop_twist_joy teleop-launch.py 
+ros2 run pnd_joy_control pnd_joy_control
+ros2 run pnd_controller_node pnd_controller_node_exe 
+
+
+candump can0
+candump can1
 ```
 
 ### 1.2 Basic Usage
